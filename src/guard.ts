@@ -26,7 +26,10 @@ const DEFAULT_PRICES: Record<string, number> = {
   "veo 3.1 - lite": 10, "veo 3.1 - fast": 20, "veo 3.1 - quality": 100,
 };
 // Models priced by the second (their length is a slider). Keys are "model|resolution". Seen in Flow on 2026-11-11:
-// Omni 1.2 Flash, 720p, 15 s = 60 credits. Assumed to scale evenly with length until Flow's quotes say otherwise.
+// Omni 1.2 Flash, 720p, 15 s = 60 credits. Measured the same day with the length read back correctly: 7 s = 21 and
+// 8 s = 24 (3 a second), so the price is not one flat rate. 4 a second stays as a deliberately high ceiling for the
+// estimate; Flow's own quote is what is checked before anything is spent. NOTE: quotes learned before the slider fix
+// (slider.ts) were filed under the wrong length (21 under 4 s, 24 under 5 s): delete ~/.flow-mcp/prices.json once.
 const DEFAULT_PER_SECOND: Record<string, number> = { "omni 1.2 flash|720p": 4 };
 const rateKey = (s: Pick<SceneParams, "model" | "resolution">) => `${norm(s.model)}|/s|${s.resolution ?? ""}`;
 

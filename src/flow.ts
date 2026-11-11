@@ -5,6 +5,7 @@ import type { Locator, Page } from "playwright-core";
 import { HOME_DIR, getFlowPage, inEnglish } from "./chrome.js";
 import type { Job } from "./queue.js";
 import { learnPrice, record } from "./guard.js";
+import { sliderSeconds } from "./slider.js";
 import { extractZip } from "./platform.js";
 
 export interface FlowState {
@@ -410,10 +411,17 @@ async function pickDuration(page: Page, seconds: number): Promise<void> {
   const slider = page.getByRole("slider").first();
   if (!(await slider.count())) await openSettings(page).catch(() => undefined);
   if (!(await slider.count())) throw new Error(`Flow has no "${seconds}s" option and no length slider for the current mode/model.`);
+  // The slider's aria-valuenow is its POSITION (0-12 for 3-15 s), not the seconds: see slider.ts. Reading it as
+  // seconds made 4 s come out as 7 s and 5 s as 8 s (2026-11-11), charged at the longer length.
   const shown = async (): Promise<number> => {
-    const now = await slider.getAttribute("aria-valuenow").catch(() => null);
-    const value = now ?? (await slider.inputValue().catch(() => ""));
-    return Number(value || NaN);
+    const attr = (name: string) => slider.getAttribute(name).catch(() => null);
+    const now = (await attr("aria-valuenow")) ?? (await slider.inputValue().catch(() => null));
+    return sliderSeconds({
+      now,
+      text: await attr("aria-valuetext"),
+      min: (await attr("aria-valuemin")) ?? (await attr("min")),
+      max: (await attr("aria-valuemax")) ?? (await attr("max")),
+    });
   };
   await slider.focus();
   for (let attempt = 0; attempt < 3; attempt++) {
@@ -427,6 +435,13 @@ async function pickDuration(page: Page, seconds: number): Promise<void> {
     const key = at < seconds ? "ArrowRight" : "ArrowLeft";
     for (let i = 0; i < Math.abs(seconds - at); i++) await page.keyboard.press(key);
     await pause(page, 300);
+  }
+  // Second opinion that does not go through the slider's own attributes: the settings button's label reads
+  // "Video · 720p · 7s ..." with the length Flow will really use. A mismatch stops the job before anything is spent.
+  const label = await settingsTrigger(page).innerText({ timeout: 2000 }).then((t) => t.replace(/\s+/g, " "), () => "");
+  const labelled = Number(/(?:^|[\s·])(\d{1,2})s(?:[\s·]|$)/.exec(label)?.[1] ?? NaN);
+  if (Number.isFinite(labelled) && labelled !== seconds) {
+    throw new Error(`Flow's settings button shows ${labelled}s but ${seconds}s was asked for ("${label.trim()}"). Nothing was generated.`);
   }
   const final = await shown();
   if (final !== seconds) {
