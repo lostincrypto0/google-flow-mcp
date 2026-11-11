@@ -8,7 +8,7 @@ import { KOKORO_DEFAULT_VOICE, KOKORO_MB, KOKORO_VOICES, kokoroReady, speakWithK
 import { extractFirstFrame, extractFrameAt, extractLastFrame } from "./chain.js";
 import { burnCaptions, captionedName, captionSetup, previewCaptions, transcribe } from "./captions.js";
 import { presenter } from "./presenter.js";
-import { characterLook, createCharacter, createProject, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, forgetCharacter, listCharacters, rememberCharacter, creditBalance, openProjectFor, projectFor, projectList, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
+import { characterLook, createCharacter, createProject, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, forgetCharacter, listCharacters, rememberCharacter, creditBalance, openProjectFor, projectFor, projectList, runAgentBatch, runContinue, runEdit, runGeneration, quoteScene } from "./flow.js";
 import { JobQueue, type Job, type SceneParams } from "./queue.js";
 import { askForApproval } from "./attention.js";
 import { blocked, budgetView, checkOverrun, copyForReview, estimate, loadBudget, record, resume, settle } from "./guard.js";
@@ -409,6 +409,14 @@ export const shapes = {
     voice: z.string().optional().describe("Flow voice name, e.g. 'Charon' (male, informative) or 'Aoede' (female, breezy)."),
   },
   techniques: { category: z.enum(["camera", "product", "transition", "image"]).optional() },
+  quote: {
+    model: z.string().optional().describe("Model label as in flow_generate, e.g. 'Omni 1.2 Flash'. Omitted: Flow's current model."),
+    duration: z.number().int().min(3).max(15).optional().describe("Video length in whole seconds, as in flow_generate."),
+    resolution: z.enum(["360p", "720p"]).optional(),
+    aspect_ratio: z.enum(["16:9", "9:16", "1:1", "4:3", "3:4"]).optional(),
+    variants: z.number().int().min(1).max(4).optional().describe("Outputs per prompt. Default 1."),
+    type: z.enum(["video", "image"]).default("video"),
+  },
   estimate: {
     scenes: z
       .array(
@@ -479,6 +487,7 @@ export interface Core {
   continue_shot(a: Args<"continue_shot">): Promise<unknown>;
   agent(a: Args<"agent">): Promise<unknown>;
   estimate(a: Args<"estimate">): Promise<unknown>;
+  quote(a: Args<"quote">): Promise<unknown>;
   approve(a: Args<"approve">): Promise<unknown>;
   reject(a: Args<"reject">): Promise<unknown>;
   resume(): Promise<unknown>;
@@ -795,6 +804,24 @@ export class LocalCore implements Core {
     }
     if (!jobs.length) throw new Error("Nothing to retry: no failed jobs, and no batch with failed images.");
     return { ...this.receipt(jobs), jobs: jobs.map(jobView) };
+  }
+
+  // Flow's own price for these settings, read without generating anything. Free: it only opens the settings popover.
+  async quote(a: Args<"quote">) {
+    if (this.queue.busy) throw new Error(BUSY);
+    const params: SceneParams = { prompt: "quote", max_credits: 0, retries: 0, output_dir: "", file_stem: "quote", ...a };
+    const credits = await quoteScene(params);
+    const n = a.variants ?? 1;
+    const budget = loadBudget();
+    const e = estimate(params, budget);
+    return {
+      flow_quote_credits: credits,
+      per_second: a.duration ? Math.round((credits / n / a.duration) * 100) / 100 : undefined,
+      fits_limits: credits <= budget.per_job && !blocked(credits),
+      limits: { per_job: budget.per_job, per_day: budget.per_day, per_month: budget.per_month },
+      next_estimate_will_show: e.credits,
+      note: "This is Flow's own quote for these exact settings. Nothing was generated and nothing was spent. flow_estimate now returns this figure for the same model, length and resolution; flow_generate then waits for the user's Approve click at this amount.",
+    };
   }
 
   async assets({ kind }: Args<"assets">) {

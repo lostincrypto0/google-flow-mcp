@@ -3,7 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import type { Locator, Page } from "playwright-core";
 import { HOME_DIR, getFlowPage, inEnglish } from "./chrome.js";
-import type { Job } from "./queue.js";
+import type { Job, SceneParams } from "./queue.js";
 import { learnPrice, record } from "./guard.js";
 import { sliderSeconds } from "./slider.js";
 import { extractZip } from "./platform.js";
@@ -929,6 +929,51 @@ async function ensureProjectGrid(page: Page): Promise<void> {
   await scrollToTop(page);
 }
 
+// Brings the Flow tab to its project grid and checks the plain composer is usable (Agent off, prompt cleared).
+// When the prompt box is not there (a session/welcome panel on the right can cover it), what the page looked like is
+// saved to ~/.flow-mcp/debug so the cause can be mapped from the real page instead of guessed (2026-11-11).
+async function readyComposer(page: Page, why: string): Promise<void> {
+  await ensureProjectGrid(page);
+  const agent = page.getByRole("button", { name: "Agent", exact: true });
+  await agent.waitFor({ state: "visible", timeout: 10_000 }).catch(async () => {
+    const saved = await captureDebug(page, `no-prompt-box-${why}`);
+    throw new Error(
+      `Flow's prompt box is not showing. If a session panel is open on the right of the Flow window, close it with its X, then retry. Nothing was generated.${saved ? ` (What the page looked like was saved in ${saved}.)` : ""}`,
+    );
+  });
+  if ((await agent.getAttribute("aria-pressed")) === "true") await agent.click();
+  const clear = page.getByRole("button", { name: "Clear prompt" });
+  if (await clear.isVisible().catch(() => false)) await clear.click();
+}
+
+// A screenshot plus the page's accessibility tree, for working out a failure afterwards. Never throws.
+async function captureDebug(page: Page, tag: string): Promise<string | undefined> {
+  try {
+    const dir = join(HOME_DIR, "debug");
+    mkdirSync(dir, { recursive: true });
+    const base = join(dir, `${new Date().toISOString().replace(/[:.]/g, "-")}-${tag}`);
+    await page.screenshot({ path: `${base}.png` }).catch(() => undefined);
+    const tree = await page.locator("body").ariaSnapshot({ timeout: 5000 }).catch(() => "");
+    writeFileSync(`${base}.txt`, `url: ${page.url()}\n\n${tree}\n`);
+    return base;
+  } catch {
+    return undefined;
+  }
+}
+
+// What Flow itself quotes for these settings, read from the settings popover with nothing generated and nothing
+// spent. The quote is remembered (learnPrice), so the next estimate for the same settings is Flow's exact figure.
+export async function quoteScene(params: SceneParams): Promise<number> {
+  const state = await getFlowState();
+  if (!state.signedIn || !state.inProject) throw new Error(state.hint);
+  const page = await getFlowPage();
+  await readyComposer(page, "quote");
+  const job = { id: "quote", status: "running", params, files: [], attempts: 0 } as unknown as Job;
+  const credits = await applySettings(page, job);
+  learnPrice(params, credits);
+  return credits;
+}
+
 // Drives one generation in the Flow tab and returns the downloaded file paths.
 export async function runGeneration(job: Job): Promise<string[]> {
   const state = await getFlowState();
@@ -936,14 +981,7 @@ export async function runGeneration(job: Job): Promise<string[]> {
   const page = await getFlowPage();
   const s = job.params;
 
-  await ensureProjectGrid(page);
-  const agent = page.getByRole("button", { name: "Agent", exact: true });
-  await agent.waitFor({ state: "visible", timeout: 10_000 }).catch(() => {
-    throw new Error("Flow's prompt box is not showing. If a session panel is open on the right of the Flow window, close it with its X, then retry. Nothing was generated.");
-  });
-  if ((await agent.getAttribute("aria-pressed")) === "true") await agent.click();
-  const clear = page.getByRole("button", { name: "Clear prompt" });
-  if (await clear.isVisible().catch(() => false)) await clear.click();
+  await readyComposer(page, "generate");
 
   job.credits = await applySettings(page, job);
   learnPrice(s, job.credits);

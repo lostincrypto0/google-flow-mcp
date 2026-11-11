@@ -121,6 +121,18 @@ server.registerTool(
 );
 
 server.registerTool(
+  "flow_quote",
+  {
+    title: "Read Flow's real price before generating",
+    description:
+      "Ask Flow what a clip with these settings will really cost, by opening its settings popover and reading the live quote. Free: nothing is generated and nothing is spent. Use it after flow_estimate and before flow_generate for any paid video, then tell the user the exact figure; flow_estimate and the Approve step then use Flow's own number instead of a guess. Refuses while a generation is running. Pass the same model, duration, resolution, aspect ratio and variants you will pass to flow_generate.",
+    inputSchema: shapes.quote,
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+  },
+  (args) => reply(patient("flow_quote", core.quote(args)), { studio }),
+);
+
+server.registerTool(
   "flow_wait",
   {
     title: "Wait for Flow jobs",

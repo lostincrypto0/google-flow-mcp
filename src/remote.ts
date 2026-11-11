@@ -38,6 +38,8 @@ export class RemoteCore implements Core {
   agent = (a: unknown) => call("agent", a);
   // The budget is plain files, so the price of a plan is worked out here.
   estimate = estimateHere;
+  // Opens Flow's settings in the owner's tab, so it goes through the owner.
+  quote = (a: unknown) => call("quote", a);
   approve = (a: unknown) => call("approve", a);
   reject = (a: unknown) => call("reject", a);
   resume = () => call("resume", {});
