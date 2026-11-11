@@ -8,8 +8,9 @@ import { KOKORO_DEFAULT_VOICE, KOKORO_MB, KOKORO_VOICES, kokoroReady, speakWithK
 import { extractFirstFrame, extractFrameAt, extractLastFrame } from "./chain.js";
 import { burnCaptions, captionedName, captionSetup, previewCaptions, transcribe } from "./captions.js";
 import { presenter } from "./presenter.js";
-import { characterLook, createCharacter, createProject, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, forgetCharacter, listCharacters, rememberCharacter, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
-import { JobQueue, type Job } from "./queue.js";
+import { characterLook, createCharacter, createProject, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, forgetCharacter, listCharacters, rememberCharacter, creditBalance, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
+import { JobQueue, type Job, type SceneParams } from "./queue.js";
+import { blocked, budgetView, checkOverrun, copyForReview, estimate, loadBudget, record, resume, settle } from "./guard.js";
 import { BIN, COMPUTER, moveToBin } from "./platform.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
 
@@ -28,7 +29,7 @@ const sceneSchema = z.object({
   aspect_ratio: z.enum(["16:9", "9:16", "1:1", "4:3", "3:4"]).optional().describe("Video supports 16:9 and 9:16 only."),
   duration: z.union([z.literal(4), z.literal(6), z.literal(8), z.literal(10)]).optional().describe("Video length in seconds. Omni models only; Veo 3.1 clips are fixed at 8s."),
   resolution: z.enum(["360p", "720p"]).optional().describe("Video resolution. Omni models only."),
-  max_credits: z.number().int().min(0).default(25).describe("Safety cap: the scene is skipped (nothing spent) if Flow quotes more credits than this."),
+  max_credits: z.number().int().min(0).default(25).describe("No longer used: the ceiling for a scene is the amount the user approves in Flow Studio, within the limits in their budget file."),
   variants: z.number().int().min(1).max(4).optional().describe("Outputs per prompt (each one spends credits). Default 1."),
   first_frame: z
     .string()
@@ -407,11 +408,33 @@ export const shapes = {
     voice: z.string().optional().describe("Flow voice name, e.g. 'Charon' (male, informative) or 'Aoede' (female, breezy)."),
   },
   techniques: { category: z.enum(["camera", "product", "transition", "image"]).optional() },
+  estimate: {
+    scenes: z
+      .array(
+        z.object({
+          type: z.enum(["video", "image"]).default("video"),
+          model: z.string().optional(),
+          duration: z.union([z.literal(4), z.literal(6), z.literal(8), z.literal(10)]).optional(),
+          resolution: z.enum(["360p", "720p"]).optional(),
+          variants: z.number().int().min(1).max(4).optional(),
+        }),
+      )
+      .max(100)
+      .default([])
+      .describe("The scenes you plan to pass to flow_generate; only the settings that decide the price are needed."),
+    edits: z.number().int().min(0).max(20).default(0).describe("How many flow_edit calls you plan."),
+    continues: z.number().int().min(0).max(20).default(0).describe("How many flow_continue calls you plan."),
+  },
+  // Flow Studio only (the user's clicks). Deliberately not MCP tools: the assistant proposes, the user approves.
+  approve: { job_ids: z.array(z.string()).optional().describe("Default: every job waiting for approval.") },
+  reject: { job_ids: z.array(z.string()).optional().describe("Default: every job waiting for approval.") },
+  resume: {},
+  settle: { job_id: z.string().min(1), credits: z.number().int().min(0).max(100000) },
 };
 
 type Args<K extends keyof typeof shapes> = z.infer<z.ZodObject<(typeof shapes)[K]>>;
 
-export const jobView = ({ id, status, params, files, attempts, credits, progress, note, error, failed_scenes }: Job) => ({
+export const jobView = ({ id, status, params, files, attempts, credits, estimate, approved, spent, basis, progress, note, error, failed_scenes }: Job) => ({
   id,
   status,
   project: params.output_dir,
@@ -419,6 +442,10 @@ export const jobView = ({ id, status, params, files, attempts, credits, progress
   prompt: params.prompt,
   attempts,
   credits,
+  estimate,
+  approved,
+  spent,
+  basis,
   progress,
   files,
   note,
@@ -449,6 +476,11 @@ export interface Core {
   set_key(a: Args<"set_key">): Promise<unknown>;
   continue_shot(a: Args<"continue_shot">): Promise<unknown>;
   agent(a: Args<"agent">): Promise<unknown>;
+  estimate(a: Args<"estimate">): Promise<unknown>;
+  approve(a: Args<"approve">): Promise<unknown>;
+  reject(a: Args<"reject">): Promise<unknown>;
+  resume(): Promise<unknown>;
+  settle(a: Args<"settle">): Promise<unknown>;
   outputs(): Promise<unknown>;
   transcribe(a: Args<"transcribe">): Promise<unknown>;
   caption_preview(a: Args<"caption_preview">): Promise<unknown>;
@@ -478,8 +510,89 @@ export const VOICES = [
 
 const BUSY = "A generation is running in the Flow tab. Wait for it to finish (flow_wait), then retry.";
 
+const APPROVE_HINT = "Paid jobs wait for the user: they press Approve in Flow Studio. Tell them the estimate first; you cannot approve.";
+
+// The price of a plan, worked out without touching Flow: usable from any process.
+export async function estimateHere({ scenes, edits, continues }: Args<"estimate">) {
+  const budget = loadBudget();
+  const items = [
+    ...scenes.map((s, i) => ({ what: `scene ${i + 1}${s.model ? ` (${s.model})` : ""}`, ...estimate(s, budget) })),
+    ...Array.from({ length: edits }, (_, i) => ({ what: `edit ${i + 1}`, ...estimate({ type: "video", edit_asset: "x" }, budget) })),
+    ...Array.from({ length: continues }, (_, i) => ({ what: `continue ${i + 1}`, ...estimate({ type: "video", continue_from: "x" }, budget) })),
+  ];
+  const total = items.reduce((n, i) => n + i.credits, 0);
+  const view = budgetView(new Set(), { count: 0, credits: 0 });
+  const over = items.filter((i) => i.credits > budget.per_job).map((i) => `${i.what} is above the per-job limit of ${budget.per_job}`);
+  const stop = blocked(total);
+  return {
+    total_at_most: total,
+    items: items.map(({ what, credits, basis }) => ({ what, credits_at_most: credits, basis })),
+    budget: view,
+    fits: !over.length && !stop,
+    problems: [...over, ...(stop ? [stop] : [])],
+    note: "An estimate, not a charge. Flow's own quote is checked against the approved amount before every clip.",
+  };
+}
+
 export class LocalCore implements Core {
-  private queue: JobQueue = new JobQueue(async (job) => {
+  private queue: JobQueue = new JobQueue(
+    (job) => this.guarded(job),
+    (job) => blocked(job.approved ?? 0, this.running()),
+  );
+
+  private running = () => new Set(this.queue.list().filter((j) => j.status === "running").map((j) => j.id));
+
+  // Every job enters here. One that can cost credits waits for the user's Approve click; a free one runs, with a
+  // ceiling of 0 so Flow quoting anything at all stops it.
+  private submit(params: SceneParams): Job {
+    const budget = loadBudget();
+    const e = estimate(params, budget);
+    const hold = e.paid || budget.approve_free;
+    return this.queue.add({ ...params, max_credits: hold ? 0 : e.credits }, { estimate: e.credits, paid: e.paid, basis: e.basis, hold });
+  }
+
+  // Runs one job with the spending record around it: written down before it starts, so a restart cannot hide it,
+  // and settled with what it really cost afterwards.
+  private async guarded(job: Job): Promise<string[]> {
+    const approved = job.approved ?? 0;
+    const measured = job.paid && !job.params.edit_asset && !job.params.continue_from;
+    const before = measured ? await creditBalance() : undefined;
+    record("started", job, approved);
+    job.credits = undefined;
+    job.committed = false;
+    const real = async (ok: boolean): Promise<number | undefined> => {
+      // Failed before the click that starts a generation: nothing was asked of Flow, so nothing was spent.
+      if (!ok && job.paid && !job.committed) return 0;
+      // Edits, continues and image batches measure their own cost from the balance; a normal clip is measured here.
+      if (!measured) return job.credits ?? (job.paid ? undefined : 0);
+      const after = before === undefined ? undefined : await creditBalance();
+      if (before !== undefined && after !== undefined) return Math.max(0, before - after);
+      return ok ? job.credits : undefined;
+    };
+    const settleUp = (spent: number | undefined) => {
+      job.spent = spent;
+      if (spent === undefined) job.note = [job.note, `Real cost unknown: ${job.credits ?? approved} credits stay counted until you enter it in Flow Studio.`].filter(Boolean).join(" · ");
+      const over = spent === undefined ? null : checkOverrun(job, approved, spent);
+      if (over) job.note = [job.note, `Safety breaker: ${over} Everything is stopped until you press Resume.`].filter(Boolean).join(" · ");
+    };
+    try {
+      const files = await this.run(job);
+      const spent = await real(true);
+      record("finished", job, spent);
+      settleUp(spent);
+      job.files = files;
+      const review = copyForReview(job);
+      if (review) job.note = [job.note, review.startsWith("could not") ? review : `Review copy: ${review}`].filter(Boolean).join(" · ");
+      return files;
+    } catch (err) {
+      const spent = await real(false);
+      record("failed", job, spent, err instanceof Error ? err.message.slice(0, 300) : String(err));
+      settleUp(spent);
+      throw err;
+    }
+  }
+
+  private async run(job: Job): Promise<string[]> {
     const { chain_from, reference_from } = job.params;
     if (reference_from) {
       const still = this.queue.get(reference_from)?.files.find((f) => /\.(jpe?g|png|webp)$/i.test(f));
@@ -504,11 +617,58 @@ export class LocalCore implements Core {
     if (job.params.agent_scenes) return runAgentBatch(job);
     if (job.params.edit_asset) return runEdit(job);
     return runGeneration(job);
-  });
+  }
+
+  private waiting = () => this.queue.list().filter((j) => j.status === "awaiting_approval");
+
+  private budget() {
+    const w = this.waiting();
+    return budgetView(this.running(), { count: w.length, credits: w.reduce((n, j) => n + (j.estimate ?? 0), 0) });
+  }
 
   async status({ detailed }: Args<"status">) {
     const flow = await getFlowState(detailed && !this.queue.busy);
-    return { flow, pacing: this.queue.pausedReason, output_root: OUTPUT_ROOT, jobs: this.queue.list().map(jobView) };
+    return { flow, pacing: this.queue.pausedReason, output_root: OUTPUT_ROOT, budget: this.budget(), jobs: this.queue.list().map(jobView) };
+  }
+
+  estimate = estimateHere;
+
+  // The user's Approve click. All or nothing: if the batch does not fit the limits, none of it starts.
+  async approve({ job_ids }: Args<"approve">) {
+    const jobs = this.waiting().filter((j) => !job_ids || job_ids.includes(j.id));
+    if (!jobs.length) throw new Error("Nothing is waiting for approval.");
+    const budget = loadBudget();
+    // Priced again now: the budget file or the learned prices may have changed since the job was queued.
+    const priced = jobs.map((job) => ({ job, e: estimate(job.params, budget) }));
+    const tooBig = priced.find(({ e }) => e.credits > budget.per_job);
+    if (tooBig) throw new Error(`${tooBig.job.params.file_stem} is estimated at ${tooBig.e.credits} credits, above your per-job limit of ${budget.per_job}. Raise per_job in ${this.budget().budget_file} if you want it.`);
+    const already = this.queue.list().filter((j) => j.status === "queued").reduce((n, j) => n + (j.approved ?? 0), 0);
+    const total = priced.reduce((n, { e }) => n + e.credits, 0);
+    const stop = blocked(already + total, this.running());
+    if (stop) throw new Error(stop);
+    for (const { job, e } of priced) {
+      job.estimate = e.credits;
+      job.basis = e.basis;
+      record("approved", job, e.credits);
+      this.queue.approve(job.id, e.credits);
+    }
+    return { approved: jobs.length, credits_at_most: total, budget: this.budget(), jobs: jobs.map(jobView) };
+  }
+
+  async reject({ job_ids }: Args<"reject">) {
+    const jobs = this.waiting().filter((j) => !job_ids || job_ids.includes(j.id));
+    for (const job of jobs) this.queue.cancel(job.id);
+    return { rejected: jobs.length, jobs: jobs.map(jobView) };
+  }
+
+  async resume() {
+    resume();
+    return { budget: this.budget() };
+  }
+
+  async settle({ job_id, credits }: Args<"settle">) {
+    settle(job_id, credits);
+    return { budget: this.budget() };
   }
 
   async generate({ project, scenes }: Args<"generate">) {
@@ -554,7 +714,7 @@ export class LocalCore implements Core {
         ? " Match the previous image exactly for the subject's appearance, colour palette, lighting and rendering style; this is the same scene a moment later."
         : "";
       jobs.push(
-        this.queue.add({
+        this.submit({
           ...scene,
           prompt: `${textFirst}${scene.prompt.trim().replace(/\.?$/, ".")}${phrase ? ` ${phrase}` : ""}${lock}${inherit}${textLast}`,
           chain_from: chain_previous ? jobs[i - 1].id : undefined,
@@ -564,7 +724,14 @@ export class LocalCore implements Core {
         }),
       );
     }
-    return { output_dir, jobs: jobs.map(jobView) };
+    return { output_dir, ...this.receipt(jobs), jobs: jobs.map(jobView) };
+  }
+
+  // What a queueing call tells the assistant about money.
+  private receipt(jobs: Job[]) {
+    const held = jobs.filter((j) => j.status === "awaiting_approval");
+    if (!held.length) return {};
+    return { awaiting_approval: { jobs: held.length, credits_at_most: held.reduce((n, j) => n + (j.estimate ?? 0), 0), what_now: APPROVE_HINT }, budget: this.budget() };
   }
 
   async wait({ job_ids, timeout_seconds }: Args<"wait">) {
@@ -576,6 +743,7 @@ export class LocalCore implements Core {
     const jobs = pick();
     return {
       finished: jobs.every((j) => j.status !== "queued" && j.status !== "running"),
+      ...(jobs.some((j) => j.status === "awaiting_approval") ? { awaiting_approval: APPROVE_HINT } : {}),
       pacing: this.queue.pausedReason,
       jobs: jobs.map(jobView),
     };
@@ -601,7 +769,7 @@ export class LocalCore implements Core {
         const pick = job.failed_scenes.map((n) => numbers.indexOf(n)).filter((i) => i >= 0);
         job.failed_scenes = undefined;
         jobs.push(
-          this.queue.add({
+          this.submit({
             ...p,
             prompt: `Agent batch: ${pick.length} failed image(s) again`,
             agent_scenes: pick.map((i) => p.agent_scenes![i]),
@@ -616,7 +784,7 @@ export class LocalCore implements Core {
       if (again) jobs.push(again);
     }
     if (!jobs.length) throw new Error("Nothing to retry: no failed jobs, and no batch with failed images.");
-    return { jobs: jobs.map(jobView) };
+    return { ...this.receipt(jobs), jobs: jobs.map(jobView) };
   }
 
   async assets({ kind }: Args<"assets">) {
@@ -693,7 +861,7 @@ export class LocalCore implements Core {
     for (const r of references ?? []) {
       if (!r.image.startsWith("asset:") && !existsSync(r.image)) throw new Error(`Reference image not found: ${r.image}`);
     }
-    const job = this.queue.add({
+    const job = this.submit({
       agent_refs: references?.length ? references : undefined,
       agent_scene_refs: references?.length ? scene_references : undefined,
       prompt: `Agent batch: ${scenes.length} images`,
@@ -705,13 +873,13 @@ export class LocalCore implements Core {
       output_dir,
       file_stem: this.nextStem(output_dir, "scene"),
     });
-    return { output_dir, jobs: [jobView(job)] };
+    return { output_dir, ...this.receipt([job]), jobs: [jobView(job)] };
   }
 
   async edit({ project, asset, prompt, download_quality }: Args<"edit">) {
     const output_dir = projectDir(project);
-    const job = this.queue.add({ prompt, type: "video", max_credits: 0, edit_asset: asset, download_quality, output_dir, file_stem: this.nextStem(output_dir, "edit") });
-    return { output_dir, jobs: [jobView(job)] };
+    const job = this.submit({ prompt, type: "video", max_credits: 0, edit_asset: asset, download_quality, output_dir, file_stem: this.nextStem(output_dir, "edit") });
+    return { output_dir, ...this.receipt([job]), jobs: [jobView(job)] };
   }
 
   // Flow's composer takes a start frame OR a character, never both; agent mode takes both, so this goes that way.
@@ -734,7 +902,7 @@ export class LocalCore implements Core {
       }
     }
     const output_dir = projectDir(project);
-    const job = this.queue.add({
+    const job = this.submit({
       prompt,
       type: "video",
       max_credits: 0,
@@ -746,7 +914,7 @@ export class LocalCore implements Core {
       output_dir,
       file_stem: this.nextStem(output_dir, "shot"),
     });
-    return { output_dir, jobs: [jobView(job)] };
+    return { output_dir, ...this.receipt([job]), jobs: [jobView(job)] };
   }
 
   // Moves a file or a project folder from the films folder to the system's bin - recoverable from there, never

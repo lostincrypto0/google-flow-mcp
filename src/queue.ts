@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-export type JobStatus = "queued" | "running" | "done" | "failed" | "cancelled";
+export type JobStatus = "awaiting_approval" | "queued" | "running" | "done" | "failed" | "cancelled";
 
 export interface SceneParams {
   prompt: string;
@@ -44,6 +44,15 @@ export interface Job {
   files: string[];
   attempts: number;
   credits?: number;
+  // Credit guard: the estimate shown to the user, what they approved (the ceiling for this job), what it really
+  // cost, and whether it can cost anything at all. A paid job never runs, or re-runs, without the user's approval.
+  estimate?: number;
+  approved?: number;
+  spent?: number;
+  paid?: boolean;
+  basis?: string;
+  // Set just before the click that makes Flow generate. A paid job that fails before it has spent nothing.
+  committed?: boolean;
   progress?: string;
   note?: string;
   error?: string;
@@ -54,6 +63,9 @@ export interface Job {
 }
 
 export type JobRunner = (job: Job) => Promise<string[]>;
+// Asked before every job starts: a reason not to run it (limit reached, STOP file, safety breaker), or null.
+export type JobGate = (job: Job) => string | null;
+export type JobMeta = Pick<Job, "estimate" | "paid" | "basis"> & { hold?: boolean };
 
 // Flow is driven like a careful person would: one generation at a time, with a
 // randomised pause between them.
@@ -66,12 +78,15 @@ export class JobQueue {
   private lastFinished = 0;
   pausedReason: string | null = null;
 
-  constructor(private runner: JobRunner) {}
+  constructor(private runner: JobRunner, private gate?: JobGate) {}
 
-  add(params: SceneParams): Job {
+  // hold: the job waits as "awaiting_approval" and only approve() lets it run.
+  add(params: SceneParams, { hold, ...meta }: JobMeta = {}): Job {
     const job: Job = {
       id: randomUUID().slice(0, 8),
-      status: "queued",
+      status: hold ? "awaiting_approval" : "queued",
+      ...meta,
+      approved: hold ? undefined : (meta.estimate ?? 0),
       params,
       files: [],
       attempts: 0,
@@ -98,7 +113,9 @@ export class JobQueue {
   retry(id: string): Job | undefined {
     const job = this.jobs.get(id);
     if (job && (job.status === "failed" || job.status === "cancelled")) {
-      job.status = "queued";
+      // A paid job goes back to the user: running it again spends again, and that is theirs to decide.
+      job.status = job.paid ? "awaiting_approval" : "queued";
+      if (job.paid) job.approved = undefined;
       job.error = undefined;
       job.finishedAt = undefined;
       void this.work();
@@ -106,9 +123,22 @@ export class JobQueue {
     return job;
   }
 
+  // The user's go-ahead: `approved` becomes this job's ceiling.
+  approve(id: string, approved: number): Job | undefined {
+    const job = this.jobs.get(id);
+    if (job && job.status === "awaiting_approval") {
+      job.approved = approved;
+      job.params.max_credits = approved;
+      job.note = undefined;
+      job.status = "queued";
+      void this.work();
+    }
+    return job;
+  }
+
   cancel(id: string): Job | undefined {
     const job = this.jobs.get(id);
-    if (job && job.status === "queued") {
+    if (job && (job.status === "queued" || job.status === "awaiting_approval")) {
       job.status = "cancelled";
       job.finishedAt = new Date().toISOString();
     }
@@ -132,6 +162,16 @@ export class JobQueue {
           }
         }
         if (job.status !== "queued") continue;
+        const stop = this.gate?.(job);
+        if (stop) {
+          // Nothing runs past a stop. Everything queued goes back to waiting, so carrying on is the user's decision.
+          for (const j of this.list().filter((q) => q.status === "queued")) {
+            j.status = "awaiting_approval";
+            j.approved = undefined;
+            j.note = stop;
+          }
+          return;
+        }
         job.status = "running";
         job.attempts++;
         try {
@@ -143,7 +183,7 @@ export class JobQueue {
           // Failed tiles are already retried inside Flow (its own Retry button); only an agent that produced nothing
           // is re-queued here. Timeouts are never retried automatically: they may still have spent credits.
           const retryable = /agent finished without creating/i.test(job.error);
-          job.status = retryable && job.attempts <= (job.params.retries ?? 1) ? "queued" : "failed";
+          job.status = retryable && !job.paid && job.attempts <= (job.params.retries ?? 1) ? "queued" : "failed";
         }
         job.finishedAt = new Date().toISOString();
         this.lastFinished = Date.now();

@@ -17,8 +17,10 @@ OmniFlow (lingoflow.pro/omniflow), using subscription credits instead of the API
 - Anything that spends credits needs the user's OK first. Images (Nano Banana 2) cost 0 and exercise the same pipeline.
 - Never enter Google credentials; the user signs in by hand via `npm run login`.
 - No bot-detection evasion. The page has invisible reCAPTCHA; we only drive the real UI at human pace.
-- MCP FIRST, ALWAYS. When a new Flow capability or workaround is learned, build it into the MCP before using it for
-  the task at hand, and do not ask whether to - the user has made this standing. Hand-driving a path once and moving
+- CREDIT GUARD (src/guard.ts): paid jobs wait for the user's Approve click in Flow Studio. Never add an MCP tool, a
+  flag or a default that approves, raises a limit or writes budget.json. `npm test` covers it without Chrome.
+- MCP FIRST. When a new Flow capability or workaround is learned, propose building it into the MCP before using it
+  for the task at hand, and ask the user before changing code or spending credits. Hand-driving a path once and moving
   on is not acceptable: the next run must be able to do it through the tools. Map the selectors live, wire the
   feature in, rebuild, then carry on with the user's actual request.
 

@@ -89,7 +89,7 @@ server.registerTool(
   {
     title: "Flow status",
     description:
-      "Check the Flow Chrome session (signed in, project open, plan, credits left) and the generation queue. Call this first; it says what the user must fix before generating, and returns the prompt playbook.",
+      "Check the Flow Chrome session (signed in, project open, plan, credits left), the generation queue and the user's credit budget (limits, spent today and this month, jobs waiting for approval, any stop). Call this first; it says what the user must fix before generating, and returns the prompt playbook. `budget.unsettled` lists jobs that started and never reported a cost, for example after a restart: check flow_assets before making any of them again, they may have been generated and charged.",
     inputSchema: shapes.status,
     annotations: { readOnlyHint: true, openWorldHint: true },
   },
@@ -101,11 +101,23 @@ server.registerTool(
   {
     title: "Queue Flow generations",
     description:
-      "Queue one clip or image per scene in the open Flow project. Runs one at a time with human-like pauses and spends the user's Google AI credits (approx. per video: Omni 1.1 Flash 7-12, Veo 3.1 Lite 10, Fast 20, Quality 100; images 0). Each scene is checked against max_credits using Flow's own quote before anything is spent. Returns job ids immediately; use flow_wait for results.",
+      "Queue one clip or image per scene in the open Flow project. Runs one at a time with human-like pauses and spends the user's Google AI credits (approx. per video: Omni 1.1 Flash 7-12, Veo 3.1 Lite 10, Fast 20, Quality 100; images 0). Call flow_estimate first and tell the user the total. Anything that costs credits is NOT started by this call: it waits as awaiting_approval until the user presses Approve in Flow Studio, and you cannot approve it. The approved amount is each scene's ceiling, checked against Flow's own quote before anything is spent, within the user's per-job, daily and monthly limits. Free images run straight away. Returns job ids immediately; use flow_wait for results.",
     inputSchema: shapes.generate,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
   (args) => reply(core.generate(args)),
+);
+
+server.registerTool(
+  "flow_estimate",
+  {
+    title: "Estimate credits before generating",
+    description:
+      "Work out what a plan will cost at most, before queueing anything: per scene and in total, with the user's limits and what is left today and this month. Free, instant, touches nothing in Flow. Call it before flow_generate, flow_edit or flow_continue and give the user the numbers; they approve the spend themselves in Flow Studio.",
+    inputSchema: shapes.estimate,
+    annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: false },
+  },
+  (args) => reply(core.estimate(args), { studio }),
 );
 
 server.registerTool(
@@ -135,7 +147,7 @@ server.registerTool(
   "flow_retry",
   {
     title: "Retry failed Flow jobs",
-    description: "Put failed jobs back in the queue with the same settings and file names (default: all failed jobs). Scenes already retry once on their own when Flow reports a failure. An image batch that finished with some images still failed (its job lists failed_scenes) is not run again whole: only those images are made again, saved under their own scene numbers.",
+    description: "Put failed jobs back in the queue with the same settings and file names (default: all failed jobs). A job that costs credits goes back to awaiting_approval: the user decides whether to pay for another try. Free scenes already retry once on their own when Flow reports a failure. An image batch that finished with some images still failed (its job lists failed_scenes) is not run again whole: only those images are made again, saved under their own scene numbers.",
     inputSchema: shapes.retry,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
@@ -182,7 +194,7 @@ server.registerTool(
   {
     title: "Edit an existing video",
     description:
-      "Video-to-video edit of a clip already in the Flow project (relight, change weather/background, remove or restyle objects) using Flow's edit view. Queued like a generation; use flow_wait for the file. Spends credits without a prior quote (about 20 for a 4 s clip), so ask the user before calling.",
+      "Video-to-video edit of a clip already in the Flow project (relight, change weather/background, remove or restyle objects) using Flow's edit view. Queued like a generation; use flow_wait for the file. Spends credits without a prior quote (about 20 for a 4 s clip), so the user's whole per-job limit is set aside for it and it waits as awaiting_approval until the user presses Approve in Flow Studio. Tell them the cost first.",
     inputSchema: shapes.edit,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },
@@ -194,7 +206,7 @@ server.registerTool(
   {
     title: "Continue a clip, keeping a character attached",
     description:
-      "Start a new clip from the last frame of one already in the project, for a continuous take across a cut. It saves the source clip's real final frame, animates it through Flow's agent mode, and downloads the result. mode 'exact' (default) gives an invisible join - the clip opens on the actual last frame - but attached characters are ignored, so the likeness must come from that frame; mode 'likeness' keeps a character or your avatar locked at the cost of an only-approximate opening frame. Flow cannot do both at once. Agent mode shows no credit quote beforehand, so ask the user before calling. Queued like a generation; use flow_wait for the file.",
+      "Start a new clip from the last frame of one already in the project, for a continuous take across a cut. It saves the source clip's real final frame, animates it through Flow's agent mode, and downloads the result. mode 'exact' (default) gives an invisible join - the clip opens on the actual last frame - but attached characters are ignored, so the likeness must come from that frame; mode 'likeness' keeps a character or your avatar locked at the cost of an only-approximate opening frame. Flow cannot do both at once. Agent mode shows no credit quote beforehand, so the user's whole per-job limit is set aside for it and it waits as awaiting_approval until the user presses Approve in Flow Studio. Tell them the cost first. Queued like a generation; use flow_wait for the file.",
     inputSchema: shapes.continue_shot,
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
   },

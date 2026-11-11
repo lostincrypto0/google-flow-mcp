@@ -13,6 +13,7 @@ export const TOKEN_FILE = join(HOME_DIR, "token");
 const UPLOAD_DIR = join(HOME_DIR, "uploads");
 const STUDIO_HTML = fileURLToPath(new URL("../studio/index.html", import.meta.url));
 const MAX_UPLOAD = 200 * 1024 * 1024;
+const API = new Set<string>(Object.keys(shapes));
 
 const MIME: Record<string, string> = {
   ".mp4": "video/mp4", ".webm": "video/webm", ".mov": "video/quicktime", ".gif": "image/gif",
@@ -80,10 +81,13 @@ export async function startServer(core: Core): Promise<ServerRole> {
         return res.end(readFileSync(STUDIO_HTML, "utf8").replace("__FLOW_TOKEN__", token));
       }
 
-      const given = req.headers["x-flow-token"] ?? url.searchParams.get("token");
+      // The token travels in a header. Only media links (<video src>, <img src>) may carry it in the address, because
+      // a browser cannot add a header to those.
+      const isMedia = req.method === "GET" && url.pathname === "/media";
+      const given = req.headers["x-flow-token"] ?? (isMedia ? url.searchParams.get("token") : undefined);
       if (given !== token) return json(res, 401, { error: "Missing or wrong token." });
 
-      if (req.method === "GET" && url.pathname === "/media") return sendMedia(req, res, url.searchParams.get("path") ?? "");
+      if (isMedia) return sendMedia(req, res, url.searchParams.get("path") ?? "");
 
       if (req.method === "POST" && url.pathname === "/api/upload") {
         const name = basename(url.searchParams.get("name") ?? "upload").replace(/[^\w.-]+/g, "_");
@@ -93,7 +97,8 @@ export async function startServer(core: Core): Promise<ServerRole> {
       }
 
       const method = url.pathname.match(/^\/api\/(\w+)$/)?.[1] as keyof Core | undefined;
-      if (req.method === "POST" && method && typeof core[method] === "function") {
+      // Only the named API methods: nothing else on the object can be reached by its name.
+      if (req.method === "POST" && method && API.has(method) && typeof core[method] === "function") {
         const raw = (await readBody(req, 1024 * 1024)).toString() || "{}";
         const shape = (shapes as Record<string, z.ZodRawShape>)[method];
         const args = shape ? z.object(shape).parse(JSON.parse(raw)) : undefined;

@@ -106,6 +106,10 @@ input:focus,select:focus,textarea:focus{border-color:var(--tally)}
 .job video,.job img.out{width:100%;max-height:420px;object-fit:contain;border-radius:12px;background:#000}
 .meter{height:8px;border-radius:9px;background:var(--ink3);overflow:hidden}.meter i{display:block;height:100%;background:var(--tally);transition:width .6s}
 .pacing{font:700 15px var(--mono);color:var(--warn);margin-bottom:10px}
+.badge.awaiting_approval{background:var(--warn);color:var(--ink)}
+.budget{font:700 15px var(--mono);margin-bottom:10px;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+.approve{margin-bottom:12px;padding:12px 14px;border-left:5px solid var(--warn);background:var(--ink2);border-radius:var(--r);display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.approve.stop{border-left-color:var(--bad)} .approve p{margin:0;flex:1 1 220px}
 .empty{color:var(--dim);font-size:16px}
 .gal{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin-top:10px}
 .gal figure{margin:0;border-radius:10px;overflow:hidden;background:#000;border:2px solid var(--line);cursor:pointer}
@@ -410,7 +414,7 @@ audio{width:100%;margin-top:8px;filter:invert(1) hue-rotate(180deg)}
     <aside class="side">
       <section>
         <h2>Monitor</h2>
-        <div class="card"><div id="pacing"></div><div id="jobs"><p class="empty">Nothing queued yet.</p></div></div>
+        <div class="card"><div id="budget"></div><div id="approve"></div><div id="pacing"></div><div id="jobs"><p class="empty">Nothing queued yet.</p></div></div>
       </section>
       <section id="galCard">
         <h2>Gallery <small>saved on <span data-place="computer">this Mac</span></small></h2>
@@ -760,7 +764,7 @@ $("#e_go").onclick = async () => {
   if (!asset) return toast("Load and pick a clip first.", true);
   if (!change) return toast("Describe what to change.", true);
   if (!confirm("Flow gives no price before an edit. A 4-second clip cost 20 credits when measured. Continue?")) return;
-  try { await api("edit", { project: $("#e_project").value.trim() || "MyFilm", asset, prompt: change, acknowledge_cost: true }); $("#e_info").textContent = "Queued — watch the Monitor."; poll(); }
+  try { await api("edit", { project: $("#e_project").value.trim() || "MyFilm", asset, prompt: change, acknowledge_cost: true }); $("#e_info").textContent = "Waiting for your Approve in the Monitor."; poll(); }
   catch (err) { $("#e_info").textContent = err.message; toast(err.message, true); }
 };
 
@@ -789,7 +793,7 @@ $("#k_go").onclick = async () => {
       attach: mode === "likeness" && cast ? [cast] : undefined,
       acknowledge_cost: true,
     });
-    $("#k_info").textContent = "Queued — watch the Monitor.";
+    $("#k_info").textContent = "Waiting for your Approve in the Monitor.";
     poll();
   } catch (err) { $("#k_info").textContent = err.message; toast(err.message, true); }
 };
@@ -1083,7 +1087,7 @@ $("#roll").onclick = async () => {
   }));
   const cost = video ? list.reduce((n, s) => n + sceneCost(s), 0) : 0;
   if (cost > 0 && !confirm(`Queue ${scenes.length} shot(s) for about ${cost} credits?`)) return;
-  try { await api("generate", { project: cfg.project, scenes }); toast(video ? "Rolling." : "Rendering frames."); poll(); } catch (err) { toast(err.message, true); }
+  try { await api("generate", { project: cfg.project, scenes }); toast(video ? "Waiting for your Approve in the Monitor." : "Rendering frames."); poll(); } catch (err) { toast(err.message, true); }
 };
 
 /* ---------- monitor + gallery ---------- */
@@ -1144,9 +1148,34 @@ $("#galTrashDir").onclick = async () => {
   if (await discardLocal(p.dir, `the "${p.name}" folder and its ${p.files.length} file(s)`)) loadGallery();
 };
 $("#jobs").addEventListener("click", async (e) => {
-  const r = e.target.closest("[data-retry]"), c = e.target.closest("[data-cancel]");
-  try { if (r) await api("retry", { job_ids: [r.dataset.retry] }); if (c) await api("cancel", { job_id: c.dataset.cancel }); if (r || c) poll(); }
+  const r = e.target.closest("[data-retry]"), c = e.target.closest("[data-cancel]"), a = e.target.closest("[data-approve]");
+  try { if (r) await api("retry", { job_ids: [r.dataset.retry] }); if (c) await api("cancel", { job_id: c.dataset.cancel }); if (a) await api("approve", { job_ids: [a.dataset.approve] }); if (r || c || a) poll(); }
   catch (err) { toast(err.message, true); }
+});
+/* Credit guard: the budget line, the Approve bar and the stop notice. Only clicks here start anything that costs credits. */
+function renderBudget(b) {
+  if (!b) return;
+  if (b.error) { $("#budget").innerHTML = ""; $("#approve").innerHTML = `<div class="approve stop"><p>${esc(b.error)}</p></div>`; return; }
+  $("#budget").innerHTML = `<div class="budget"><span>Today ${b.spent_today} / ${b.limits.per_day} cr</span><span>Month ${b.spent_month} / ${b.limits.per_month} cr</span><span>Per job ≤ ${b.limits.per_job} cr</span></div>`;
+  const w = b.waiting_for_approval, parts = [];
+  if (b.stopped) parts.push(`<div class="approve stop"><p>Stopped: ${esc(b.stopped)}</p>${b.breaker ? `<button class="btn small" data-resume>Resume</button>` : ""}</div>`);
+  for (const u of b.unsettled || []) parts.push(`<div class="approve stop"><p>${esc(u.project || "")} ${esc(u.scene || "")} started and never reported its cost. It may have been made and charged: look in Flow before making it again. Counted as ${u.counted} cr.</p><button class="btn small" data-settle="${esc(u.id)}">Enter real cost</button></div>`);
+  if (w.count) parts.push(`<div class="approve"><p>${w.count} job${w.count > 1 ? "s" : ""} waiting for your OK · at most ${w.credits} credits · ${b.left_today} left today</p><button class="btn small" data-approve-all>Approve all</button><button class="btn small ghost" data-reject-all>Reject all</button></div>`);
+  $("#approve").innerHTML = parts.join("");
+}
+$("#approve").addEventListener("click", async (e) => {
+  const t = e.target;
+  try {
+    if (t.closest("[data-approve-all]")) { const out = await api("approve", {}); toast(`Approved: at most ${out.credits_at_most} credits`); }
+    else if (t.closest("[data-reject-all]")) { await api("reject", {}); toast("Rejected. Nothing was spent."); }
+    else if (t.closest("[data-resume]")) { await api("resume", {}); toast("Resumed. Waiting jobs still need your Approve."); }
+    else if (t.closest("[data-settle]")) {
+      const n = window.prompt("How many credits did it really cost? (0 if it was never made)");
+      if (n === null || !/^\d+$/.test(n.trim())) return;
+      await api("settle", { job_id: t.closest("[data-settle]").dataset.settle, credits: Number(n.trim()) });
+    } else return;
+    poll();
+  } catch (err) { toast(err.message, true); }
 });
 function renderStatus(st) {
   const f = st.flow, active = st.jobs.some((j) => j.status === "running" || j.status === "queued");
@@ -1157,17 +1186,18 @@ function renderStatus(st) {
   if (f.plan) renderStatus.plan = f.plan;
   $("#status").innerHTML = `<span class="pill"><i class="tally ${cls}"></i>${text}</span>${renderStatus.plan ? `<span class="pill">${esc(renderStatus.plan)}</span>` : ""}${renderStatus.credits !== undefined ? `<span class="pill">${renderStatus.credits.toLocaleString()} credits</span>` : ""}`;
   $("#hint").innerHTML = f.hint ? `<div class="hint">${esc(f.hint)}</div>` : "";
+  renderBudget(st.budget);
   $("#pacing").innerHTML = st.pacing ? `<div class="pacing">⏱ ${esc(st.pacing)}</div>` : "";
   const jobs = [...st.jobs].reverse();
-  const sig = JSON.stringify(jobs.map((j) => [j.id, j.status, j.progress, j.files.length, j.credits, j.attempts, j.failed_scenes?.length ?? 0]));
+  const sig = JSON.stringify(jobs.map((j) => [j.id, j.status, j.progress, j.files.length, j.credits, j.spent, j.estimate, j.note, j.attempts, j.failed_scenes?.length ?? 0]));
   if (sig !== renderStatus.sig) {
     if (renderStatus.sig && LIVE) loadGallery(slateFolder());
     renderStatus.sig = sig;
     $("#jobs").innerHTML = jobs.map((j) => `<div class="job"><div class="top"><span class="name">${esc((j.project || "").split(/[\\/]/).pop())} · ${esc(j.scene)}</span>
-      <span class="badge ${j.status}">${j.status}${j.progress ? " " + esc(j.progress) : ""}</span>${j.credits !== undefined ? `<span class="badge">${j.credits} cr</span>` : ""}${j.attempts > 1 ? `<span class="badge">try ${j.attempts}</span>` : ""}
-      ${j.status === "queued" ? `<button class="btn small ghost" data-cancel="${j.id}">Cancel</button>` : ""}${/failed|cancelled/.test(j.status) ? `<button class="btn small" data-retry="${j.id}">Retry</button>` : ""}${j.status === "done" && j.failed_scenes?.length ? `<button class="btn small" data-retry="${j.id}">Retry ${j.failed_scenes.length} failed image${j.failed_scenes.length > 1 ? "s" : ""}</button>` : ""}</div>
+      <span class="badge ${j.status}">${j.status}${j.progress ? " " + esc(j.progress) : ""}</span>${j.spent !== undefined ? `<span class="badge">${j.spent} cr spent</span>` : j.status === "awaiting_approval" || j.status === "queued" ? `<span class="badge">≤ ${j.estimate ?? 0} cr</span>` : j.credits !== undefined ? `<span class="badge">${j.credits} cr</span>` : ""}${j.attempts > 1 ? `<span class="badge">try ${j.attempts}</span>` : ""}
+      ${j.status === "awaiting_approval" ? `<button class="btn small" data-approve="${j.id}">Approve</button>` : ""}${/queued|awaiting_approval/.test(j.status) ? `<button class="btn small ghost" data-cancel="${j.id}">Cancel</button>` : ""}${/failed|cancelled/.test(j.status) ? `<button class="btn small" data-retry="${j.id}">Retry</button>` : ""}${j.status === "done" && j.failed_scenes?.length ? `<button class="btn small" data-retry="${j.id}">Retry ${j.failed_scenes.length} failed image${j.failed_scenes.length > 1 ? "s" : ""}</button>` : ""}</div>
       ${j.status === "running" ? `<div class="meter"><i style="width:${parseInt(j.progress) || 4}%"></i></div>` : ""}
-      <p>${esc(j.prompt)}</p>${j.note ? `<p style="color:var(--warn)">${esc(j.note)}</p>` : ""}${j.error ? `<p class="err">${esc(j.error)}</p>` : ""}
+      <p>${esc(j.prompt)}</p>${j.status === "awaiting_approval" && j.basis ? `<p style="opacity:.75">Price: ${esc(j.basis)}</p>` : ""}${j.note ? `<p style="color:var(--warn)">${esc(j.note)}</p>` : ""}${j.error ? `<p class="err">${esc(j.error)}</p>` : ""}
       ${j.files.map((p) => (/\.(mp4|webm|mov)$/i.test(p) ? `<video controls playsinline preload="metadata" src="${media(p)}"></video>` : /\.(m4a|mp3|wav)$/i.test(p) ? `<audio controls src="${media(p)}"></audio>` : `<img class="out" src="${media(p)}">`)).join("")}</div>`).join("") || `<p class="empty">Nothing queued yet.</p>`;
   }
   estimate();
@@ -1179,7 +1209,7 @@ async function poll(detailed = false) {
   try {
     const active = renderStatus(await api("status", { detailed }));
     if (wasActive && !active) { wasActive = false; loadGallery(slateFolder()); return poll(true); }
-    wasActive = active; timer = setTimeout(poll, active ? 3000 : 20000);
+    wasActive = active; timer = setTimeout(poll, active ? 3000 : 8000);
   } catch { $("#status").innerHTML = `<span class="pill"><i class="tally down"></i>Server offline</span>`; timer = setTimeout(poll, 5000); }
 }
 

@@ -4,6 +4,7 @@ import { basename, extname, join } from "node:path";
 import type { Locator, Page } from "playwright-core";
 import { HOME_DIR, getFlowPage, inEnglish } from "./chrome.js";
 import type { Job } from "./queue.js";
+import { learnPrice, record } from "./guard.js";
 import { extractZip } from "./platform.js";
 
 export interface FlowState {
@@ -99,6 +100,15 @@ async function readCredits(page: Page): Promise<number | undefined> {
   } finally {
     await dismissOverlays(page);
     await pause(page, 300);
+  }
+}
+
+// The balance right now, for measuring what a job really cost. undefined when it cannot be read.
+export async function creditBalance(): Promise<number | undefined> {
+  try {
+    return await readCredits(await getFlowPage());
+  } catch {
+    return undefined;
   }
 }
 
@@ -816,9 +826,11 @@ export async function runGeneration(job: Job): Promise<string[]> {
   if (await clear.isVisible().catch(() => false)) await clear.click();
 
   job.credits = await applySettings(page, job);
+  learnPrice(s, job.credits);
+  record("quoted", job, job.credits);
   if (job.credits > s.max_credits) {
     throw new Error(
-      `Flow quotes ${job.credits} credits for this scene, above max_credits=${s.max_credits}. Nothing was generated. Raise max_credits or pick a cheaper model/duration/variants.`,
+      `Flow quotes ${job.credits} credits for this scene, above the ${s.max_credits} that were approved. Nothing was generated and nothing was spent. Ask the user to approve the real price (flow_retry puts it back for approval), or pick a cheaper model/duration/variants.`,
     );
   }
 
@@ -852,6 +864,7 @@ export async function runGeneration(job: Job): Promise<string[]> {
   if (!(await start.isEnabled())) throw new Error("Flow's Start generation button is disabled; the prompt or inputs were not accepted.");
   await scrollToTop(page);
   const before = await mediaIds(page);
+  job.committed = true;
   await start.click();
 
   const variants = s.variants ?? 1;
@@ -1317,6 +1330,7 @@ export async function runEdit(job: Job): Promise<string[]> {
   await pause(page, 600);
   const start = page.getByRole("button", { name: "Start generation" });
   if (!(await start.isEnabled())) throw new Error("Flow did not accept the edit prompt (Start generation stayed disabled).");
+  job.committed = true;
   await start.click();
 
   // Progress shows as "NN% <prompt>" inside the edit view and disappears when the edit is ready.
@@ -1665,6 +1679,7 @@ export async function runContinue(job: Job): Promise<string[]> {
     );
     const before = await mediaIds(page);
     job.progress = "generating";
+    job.committed = true;
     await page.getByRole("button", { name: "Start generation" }).click();
 
     // The agent sometimes still stops to ask which tool to use. Nobody is watching an unattended run, so answer it.

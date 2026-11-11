@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { captionPreviewHere, captionSetupHere, captionsHere, narrateHere, presenterHere, transcribeHere, voicesHere, type Core } from "./core.js";
+import { estimateHere, captionPreviewHere, captionSetupHere, captionsHere, narrateHere, presenterHere, transcribeHere, voicesHere, type Core } from "./core.js";
 import { PORT, TOKEN_FILE } from "./server.js";
 
 // Used when another flow-mcp process (Studio or a second Claude client) already owns the Flow tab and queue.
@@ -36,6 +36,12 @@ export class RemoteCore implements Core {
   set_key = (a: unknown) => call("set_key", a);
   continue_shot = (a: unknown) => call("continue_shot", a);
   agent = (a: unknown) => call("agent", a);
+  // The budget is plain files, so the price of a plan is worked out here.
+  estimate = estimateHere;
+  approve = (a: unknown) => call("approve", a);
+  reject = (a: unknown) => call("reject", a);
+  resume = () => call("resume", {});
+  settle = (a: unknown) => call("settle", a);
   outputs = () => call("outputs", {});
   // Captions, like narration, run here: they never touch the Flow Chrome.
   transcribe = transcribeHere;

@@ -232,6 +232,19 @@ key → Save key**. It's checked with Google before it's saved, and stored only 
 
 ---
 
+## Credit guard
+
+Nothing that costs credits starts without your click.
+
+- **Your limits** live in `~/.flow-mcp/budget.json` (written on first run: 40 credits per job, 200 a day, 900 a month). Only you edit it; no tool can.
+- **Estimate first.** `flow_estimate` prices a plan without touching Flow. A model it has no price for is counted at your per-job limit.
+- **Approve in Flow Studio.** Paid jobs wait as *awaiting approval* in the Monitor until you press **Approve**. The assistant has no tool for that. The approved amount is the job's ceiling: Flow's own quote is checked against it before the click.
+- **A record that survives restarts.** `~/.flow-mcp/ledger.jsonl` notes every job before it starts and what it really cost afterwards (read from your balance). A job that started and never reported back stays counted, and the Monitor asks you what it cost.
+- **Stops.** A paid job is never retried by itself. If a job costs over 25 % more than you approved, everything stops until you press **Resume**. Creating an empty file `~/.flow-mcp/STOP` halts all work at once.
+- **Review folder.** Set `review_dir` in the budget file and every result is copied there with a small `.json` saying how it was made and what it cost.
+
+These limits guard this tool only. Google has no spending cap for Flow credits, so anything you do in Flow by hand is outside them.
+
 ## Behaviour and settings
 
 - One generation at a time, with a random 25–70 second pause between them. The page carries an
