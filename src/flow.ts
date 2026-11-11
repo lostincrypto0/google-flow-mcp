@@ -103,6 +103,56 @@ async function readCredits(page: Page): Promise<number | undefined> {
   }
 }
 
+// Which Flow project a local project folder belongs to. Tied together the first time the folder is used, to
+// whichever project is open then, and remembered in ~/.flow-mcp/projects.json. Before every job the Flow tab is
+// brought back to that project, so work never lands in whatever project happens to be open (the user's call,
+// 2026-11-11: switch back automatically, and say so).
+const PROJECTS_FILE = join(HOME_DIR, "projects.json");
+type Bound = { url: string; title: string };
+const PROJECT_URL = /^https:\/\/[^/]+\/project\/[0-9a-f-]{36}/;
+
+function boundProjects(): Record<string, Bound> {
+  try {
+    return JSON.parse(readFileSync(PROJECTS_FILE, "utf8")) as Record<string, Bound>;
+  } catch {
+    return {};
+  }
+}
+
+async function projectTitle(page: Page, url: string): Promise<string> {
+  const raw = await page.title().catch(() => "");
+  const title = raw.replace(/\s*[-|–·]\s*(Google\s+)?Flow\s*$/i, "").trim();
+  return title && !/^(google\s+)?flow$/i.test(title) ? title : `Flow project …${url.slice(-5)}`;
+}
+
+// The Flow project for a local folder, tying the folder to the open project if it has none yet. Looks, never clicks.
+export async function projectFor(local: string): Promise<Bound> {
+  const all = boundProjects();
+  if (all[local]) return all[local];
+  const page = await getFlowPage();
+  const url = page.url().match(PROJECT_URL)?.[0];
+  if (!url) throw new Error(`No Flow project is open, and "${local}" is not tied to one yet. Open or create a project in the Flow Chrome window first.`);
+  const bound = { url, title: await projectTitle(page, url) };
+  mkdirSync(HOME_DIR, { recursive: true });
+  writeFileSync(PROJECTS_FILE, JSON.stringify({ ...all, [local]: bound }, null, 2) + "\n");
+  return bound;
+}
+
+// Brings the Flow tab to the job's project. Returns a note when it had to switch.
+export async function openProjectFor(local: string): Promise<string | undefined> {
+  const bound = await projectFor(local);
+  const page = await getFlowPage();
+  if (page.url().match(PROJECT_URL)?.[0] === bound.url) return undefined;
+  await page.goto(inEnglish(bound.url), { waitUntil: "domcontentloaded" });
+  await pause(page, 2500);
+  if (page.url().match(PROJECT_URL)?.[0] !== bound.url) {
+    throw new Error(`Could not open the Flow project "${bound.title}" that "${local}" is tied to (it may have been deleted). Nothing was generated. To tie "${local}" to another project, remove its entry from ${PROJECTS_FILE}.`);
+  }
+  return `switched the Flow window back to "${bound.title}"`;
+}
+
+export const projectList = (): Record<string, Bound> => boundProjects();
+
 // The balance right now, for measuring what a job really cost. undefined when it cannot be read.
 export async function creditBalance(): Promise<number | undefined> {
   try {
@@ -350,6 +400,42 @@ async function pickRadio(page: Page, name: string | RegExp): Promise<void> {
   }
 }
 
+// Clip length. Older models offer fixed lengths as buttons ("4s", "8s"); Omni 1.2 has a "Length" slider from 3 to 15
+// seconds instead (seen 2026-11-11). The slider is moved with the keyboard and then read back: a length that did not
+// take must stop the job before anything is spent, because the price follows the length.
+async function pickDuration(page: Page, seconds: number): Promise<void> {
+  const radio = page.getByRole("radio", { name: `${seconds}s`, exact: true }).first();
+  if (await radio.isVisible().catch(() => false)) return pickRadio(page, `${seconds}s`);
+  // Counted, not checked for visibility: the real control of such a slider is often an invisible input over the track.
+  const slider = page.getByRole("slider").first();
+  if (!(await slider.count())) await openSettings(page).catch(() => undefined);
+  if (!(await slider.count())) throw new Error(`Flow has no "${seconds}s" option and no length slider for the current mode/model.`);
+  const shown = async (): Promise<number> => {
+    const now = await slider.getAttribute("aria-valuenow").catch(() => null);
+    const value = now ?? (await slider.inputValue().catch(() => ""));
+    return Number(value || NaN);
+  };
+  await slider.focus();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const at = await shown();
+    if (at === seconds) break;
+    if (Number.isNaN(at)) {
+      await page.keyboard.press("Home");
+      await pause(page, 200);
+      continue;
+    }
+    const key = at < seconds ? "ArrowRight" : "ArrowLeft";
+    for (let i = 0; i < Math.abs(seconds - at); i++) await page.keyboard.press(key);
+    await pause(page, 300);
+  }
+  const final = await shown();
+  if (final !== seconds) {
+    const range = `${(await slider.getAttribute("aria-valuemin").catch(() => null)) ?? (await slider.getAttribute("min").catch(() => null)) ?? "?"}-${(await slider.getAttribute("aria-valuemax").catch(() => null)) ?? (await slider.getAttribute("max").catch(() => null)) ?? "?"}`;
+    throw new Error(`Flow's length slider would not go to ${seconds}s (it shows ${Number.isNaN(final) ? "no readable value" : `${final}s`}, range ${range}s). Nothing was generated.`);
+  }
+  await pause(page, 300);
+}
+
 // Image jobs use the newest Nano Banana unless another model is named (the user's call, 2026-10-13: "should always
 // default to latest"). The menu then held Nano Banana Pro, 2 Lite and 2.1 - the plain "Nano Banana 2" was gone, and
 // asking for it by name picked whichever came first. The newest is the highest version number that is not a Lite model,
@@ -414,7 +500,7 @@ async function applySettings(page: Page, job: Job): Promise<number> {
   const model = s.type === "image" && LEGACY_IMAGE_MODEL.test(s.model ?? "") ? LATEST_IMAGE_MODEL : s.model;
   if (model) await pickModel(page, model);
   if (s.type === "video" && s.resolution) await pickRadio(page, new RegExp(`^${s.resolution}`));
-  if (s.type === "video" && s.duration) await pickRadio(page, `${s.duration}s`);
+  if (s.type === "video" && s.duration) await pickDuration(page, s.duration);
   await pickRadio(page, `x${s.variants ?? 1}`);
   await pause(page, 600);
   // The quote is "<N> credits". Low balances add an "Add AI credits" banner link that the old /credits?$/ also matched.

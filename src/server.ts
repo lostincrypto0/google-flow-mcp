@@ -5,6 +5,7 @@ import { basename, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { CACHE_DIR as CAPTIONS_DIR } from "./captions.js";
+import { studioSeen } from "./attention.js";
 import { HOME_DIR } from "./chrome.js";
 import { OUTPUT_ROOT, shapes, type Core } from "./core.js";
 
@@ -73,6 +74,7 @@ export async function startServer(core: Core): Promise<ServerRole> {
       // The Host check blocks DNS-rebinding; the token blocks other local pages from driving the queue.
       if (!allowedHosts.has(req.headers.host ?? "")) return json(res, 403, { error: "Bad host." });
       const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
+      if (req.headers["x-flow-studio"]) studioSeen();
 
       if (req.method === "GET" && url.pathname === "/api/health") return json(res, 200, { name: "flow-mcp" });
       if (url.pathname === "/favicon.ico") return void res.writeHead(204).end();

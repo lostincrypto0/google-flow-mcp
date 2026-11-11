@@ -25,6 +25,10 @@ const DEFAULT_PRICES: Record<string, number> = {
   "omni 1.1 flash|4|720p": 7, "omni 1.1 flash|6|720p": 10, "omni 1.1 flash|8|720p": 12, "omni 1.1 flash|10|720p": 15,
   "veo 3.1 - lite": 10, "veo 3.1 - fast": 20, "veo 3.1 - quality": 100,
 };
+// Models priced by the second (their length is a slider). Keys are "model|resolution". Seen in Flow on 2026-11-11:
+// Omni 1.2 Flash, 720p, 15 s = 60 credits. Assumed to scale evenly with length until Flow's quotes say otherwise.
+const DEFAULT_PER_SECOND: Record<string, number> = { "omni 1.2 flash|720p": 4 };
+const rateKey = (s: Pick<SceneParams, "model" | "resolution">) => `${norm(s.model)}|/s|${s.resolution ?? ""}`;
 
 const budgetSchema = z.object({
   per_job: z.number().int().min(0),
@@ -84,6 +88,7 @@ export function learnPrice(s: SceneParams, quote: number): void {
   try {
     const all = learned();
     all[priceKey(s)] = Math.ceil(quote / (s.variants ?? 1));
+    if (s.duration) all[rateKey(s)] = Math.round((quote / (s.variants ?? 1) / s.duration) * 100) / 100;
     writeFileSync(PRICES_FILE, JSON.stringify(all, null, 2) + "\n");
   } catch {
     // An estimate aid only: never let it break a generation.
@@ -116,6 +121,13 @@ export function estimate(s: Priced, budget: Budget): Estimate {
   if (past !== undefined) return { credits: past * n, quoted: true, paid: true, basis: "Flow's own quote from an earlier run" };
   const listed = s.model ? hit(DEFAULT_PRICES) : undefined;
   if (listed !== undefined) return { credits: listed * n, quoted: true, paid: true, basis: "built-in price list (may be out of date)" };
+  if (s.model && s.duration) {
+    const rate = seen[rateKey(s)];
+    if (rate !== undefined) return { credits: Math.ceil(rate * s.duration) * n, quoted: true, paid: true, basis: `${rate} credits a second, from Flow's quote for another length; Flow's quote for this one is checked before anything is spent` };
+    // "Omni 1.2" should find "Omni 1.2 Flash": Flow's menu is matched the same loose way.
+    const known = Object.entries(DEFAULT_PER_SECOND).find(([k]) => k.split("|")[0].includes(norm(s.model)) && k.split("|")[1] === (s.resolution ?? ""));
+    if (known) return { credits: Math.ceil(known[1] * s.duration) * n, quoted: true, paid: true, basis: `${known[1]} credits a second (built-in, seen 2026-11-11); Flow's quote is checked before anything is spent` };
+  }
   return { credits: budget.per_job, quoted: true, paid: true, basis: `price not known for ${s.model ? `"${s.model}"` : "Flow's current model"}: at most your per-job limit; Flow's quote is checked before anything is spent` };
 }
 

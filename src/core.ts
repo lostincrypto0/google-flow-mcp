@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { z } from "zod";
 import { assemble, voiceTrack } from "./assemble.js";
 import { GEMINI_VOICES, geminiKey, saveGeminiKey, speakWithGemini } from "./gemini.js";
@@ -8,8 +8,9 @@ import { KOKORO_DEFAULT_VOICE, KOKORO_MB, KOKORO_VOICES, kokoroReady, speakWithK
 import { extractFirstFrame, extractFrameAt, extractLastFrame } from "./chain.js";
 import { burnCaptions, captionedName, captionSetup, previewCaptions, transcribe } from "./captions.js";
 import { presenter } from "./presenter.js";
-import { characterLook, createCharacter, createProject, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, forgetCharacter, listCharacters, rememberCharacter, creditBalance, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
+import { characterLook, createCharacter, createProject, downloadAsset, trashAsset, editCharacter, getFlowState, listAssets, forgetCharacter, listCharacters, rememberCharacter, creditBalance, openProjectFor, projectFor, projectList, runAgentBatch, runContinue, runEdit, runGeneration } from "./flow.js";
 import { JobQueue, type Job, type SceneParams } from "./queue.js";
+import { askForApproval } from "./attention.js";
 import { blocked, budgetView, checkOverrun, copyForReview, estimate, loadBudget, record, resume, settle } from "./guard.js";
 import { BIN, COMPUTER, moveToBin } from "./platform.js";
 import { TECHNIQUES, techniqueById } from "./techniques.js";
@@ -27,7 +28,7 @@ const sceneSchema = z.object({
     .optional()
     .describe("Model label as shown in Flow, e.g. 'Omni 1.1 Flash', 'Veo 3.1 - Fast', 'Veo 3.1 - Quality', 'Nano Banana Pro'. Images default to the newest Nano Banana (2.1 today); video omitted keeps Flow's current model."),
   aspect_ratio: z.enum(["16:9", "9:16", "1:1", "4:3", "3:4"]).optional().describe("Video supports 16:9 and 9:16 only."),
-  duration: z.union([z.literal(4), z.literal(6), z.literal(8), z.literal(10)]).optional().describe("Video length in seconds. Omni models only; Veo 3.1 clips are fixed at 8s."),
+  duration: z.number().int().min(3).max(15).optional().describe("Video length in whole seconds. Omni 1.2: any length from 3 to 15 (a slider, priced by the second). Omni 1.1: 4, 6, 8 or 10. Veo 3.1 clips are fixed at 8s. Always pass it for Omni 1.2: left out, Flow keeps whatever the slider was last set to."),
   resolution: z.enum(["360p", "720p"]).optional().describe("Video resolution. Omni models only."),
   max_credits: z.number().int().min(0).default(25).describe("No longer used: the ceiling for a scene is the amount the user approves in Flow Studio, within the limits in their budget file."),
   variants: z.number().int().min(1).max(4).optional().describe("Outputs per prompt (each one spends credits). Default 1."),
@@ -414,7 +415,7 @@ export const shapes = {
         z.object({
           type: z.enum(["video", "image"]).default("video"),
           model: z.string().optional(),
-          duration: z.union([z.literal(4), z.literal(6), z.literal(8), z.literal(10)]).optional(),
+          duration: z.number().int().min(3).max(15).optional(),
           resolution: z.enum(["360p", "720p"]).optional(),
           variants: z.number().int().min(1).max(4).optional(),
         }),
@@ -434,7 +435,7 @@ export const shapes = {
 
 type Args<K extends keyof typeof shapes> = z.infer<z.ZodObject<(typeof shapes)[K]>>;
 
-export const jobView = ({ id, status, params, files, attempts, credits, estimate, approved, spent, basis, progress, note, error, failed_scenes }: Job) => ({
+export const jobView = ({ id, status, params, files, attempts, credits, estimate, approved, spent, basis, flow_project, progress, note, error, failed_scenes }: Job) => ({
   id,
   status,
   project: params.output_dir,
@@ -446,6 +447,7 @@ export const jobView = ({ id, status, params, files, attempts, credits, estimate
   approved,
   spent,
   basis,
+  flow_project,
   progress,
   files,
   note,
@@ -544,12 +546,16 @@ export class LocalCore implements Core {
 
   // Every job enters here. One that can cost credits waits for the user's Approve click; a free one runs, with a
   // ceiling of 0 so Flow quoting anything at all stops it.
-  private submit(params: SceneParams): Job {
+  private submit(params: SceneParams, flow_project?: string): Job {
     const budget = loadBudget();
     const e = estimate(params, budget);
     const hold = e.paid || budget.approve_free;
-    return this.queue.add({ ...params, max_credits: hold ? 0 : e.credits }, { estimate: e.credits, paid: e.paid, basis: e.basis, hold });
+    if (hold) askForApproval(e.credits, flow_project ?? "");
+    return this.queue.add({ ...params, max_credits: hold ? 0 : e.credits }, { estimate: e.credits, paid: e.paid, basis: e.basis, flow_project, hold });
   }
+
+  // The Flow project a local folder is tied to (tied to the open one on first use), by the name Flow shows.
+  private place = async (output_dir: string): Promise<string> => (await projectFor(basename(output_dir))).title;
 
   // Runs one job with the spending record around it: written down before it starts, so a restart cannot hide it,
   // and settled with what it really cost afterwards.
@@ -593,6 +599,9 @@ export class LocalCore implements Core {
   }
 
   private async run(job: Job): Promise<string[]> {
+    // The user may have opened another project since this job was queued: go back to the one it belongs to.
+    const moved = await openProjectFor(basename(job.params.output_dir));
+    if (moved) job.note = [job.note, moved].filter(Boolean).join(" · ");
     const { chain_from, reference_from } = job.params;
     if (reference_from) {
       const still = this.queue.get(reference_from)?.files.find((f) => /\.(jpe?g|png|webp)$/i.test(f));
@@ -628,7 +637,7 @@ export class LocalCore implements Core {
 
   async status({ detailed }: Args<"status">) {
     const flow = await getFlowState(detailed && !this.queue.busy);
-    return { flow, pacing: this.queue.pausedReason, output_root: OUTPUT_ROOT, budget: this.budget(), jobs: this.queue.list().map(jobView) };
+    return { flow, pacing: this.queue.pausedReason, output_root: OUTPUT_ROOT, budget: this.budget(), projects: projectList(), jobs: this.queue.list().map(jobView) };
   }
 
   estimate = estimateHere;
@@ -682,6 +691,7 @@ export class LocalCore implements Core {
     if (unknown) throw new Error(`Unknown technique "${unknown.technique}". Call flow_techniques for valid ids.`);
 
     const output_dir = projectDir(project);
+    const where = await this.place(output_dir);
     // Continue numbering after whatever is already on disk or queued, so reruns never overwrite earlier scenes.
     const onDisk = existsSync(output_dir) ? readdirSync(output_dir).map((f) => Number(f.match(/^scene-(\d+)/)?.[1] ?? 0)) : [];
     const queued = this.queue.list().filter((j) => j.params.output_dir === output_dir).map((j) => Number(j.params.file_stem.match(/\d+/)?.[0] ?? 0));
@@ -721,7 +731,7 @@ export class LocalCore implements Core {
           reference_from: reference_previous ? jobs[i - 1].id : undefined,
           output_dir,
           file_stem: `scene-${String(offset + i + 1).padStart(2, "0")}`,
-        }),
+        }, where),
       );
     }
     return { output_dir, ...this.receipt(jobs), jobs: jobs.map(jobView) };
@@ -776,7 +786,7 @@ export class LocalCore implements Core {
             agent_numbers: pick.map((i) => numbers[i]),
             agent_scene_refs: p.agent_scene_refs ? pick.map((i) => p.agent_scene_refs![i]) : undefined,
             file_stem: `scene-${String(numbers[pick[0]]).padStart(2, "0")}`,
-          }),
+          }, job.flow_project),
         );
         continue;
       }
@@ -872,13 +882,13 @@ export class LocalCore implements Core {
       agent_scenes: scenes,
       output_dir,
       file_stem: this.nextStem(output_dir, "scene"),
-    });
+    }, await this.place(output_dir));
     return { output_dir, ...this.receipt([job]), jobs: [jobView(job)] };
   }
 
   async edit({ project, asset, prompt, download_quality }: Args<"edit">) {
     const output_dir = projectDir(project);
-    const job = this.submit({ prompt, type: "video", max_credits: 0, edit_asset: asset, download_quality, output_dir, file_stem: this.nextStem(output_dir, "edit") });
+    const job = this.submit({ prompt, type: "video", max_credits: 0, edit_asset: asset, download_quality, output_dir, file_stem: this.nextStem(output_dir, "edit") }, await this.place(output_dir));
     return { output_dir, ...this.receipt([job]), jobs: [jobView(job)] };
   }
 
@@ -913,7 +923,7 @@ export class LocalCore implements Core {
       download_quality,
       output_dir,
       file_stem: this.nextStem(output_dir, "shot"),
-    });
+    }, await this.place(output_dir));
     return { output_dir, ...this.receipt([job]), jobs: [jobView(job)] };
   }
 

@@ -55,6 +55,17 @@ test("a price learned from Flow's quote, and the user's own price list, replace 
   assert.equal(g.estimate({ ...s, variants: 1 }, g.loadBudget()).credits, 28);
 });
 
+test("Omni 1.2 is priced by the second, and a quote for one length prices the others", () => {
+  reset();
+  const b = g.loadBudget(), omni = { type: "video", model: "Omni 1.2", resolution: "720p" };
+  assert.deepEqual([4, 10, 15].map((duration) => g.estimate({ ...omni, duration }, b).credits), [16, 40, 60]);
+  assert.equal(g.estimate({ ...omni, duration: 4, variants: 2 }, b).credits, 32);
+  assert.equal(g.estimate(omni, b).credits, 40, "no length given: the per-job limit");
+  g.learnPrice({ ...omni, duration: 4 }, 20);                       // Flow quoted 5 a second
+  assert.equal(g.estimate({ ...omni, duration: 4 }, b).credits, 20);
+  assert.equal(g.estimate({ ...omni, duration: 7 }, b).credits, 35);
+});
+
 test("spending is counted from the record: real cost when known, the approved amount until then", () => {
   reset();
   const a = job("a"), b = job("b"), c = job("c");

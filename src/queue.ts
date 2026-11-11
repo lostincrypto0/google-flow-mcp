@@ -6,7 +6,7 @@ export interface SceneParams {
   prompt: string;
   type: "video" | "image";
   max_credits: number;
-  duration?: 4 | 6 | 8 | 10;
+  duration?: number;
   resolution?: "360p" | "720p";
   model?: string;
   aspect_ratio?: "16:9" | "9:16" | "1:1" | "4:3" | "3:4";
@@ -51,6 +51,8 @@ export interface Job {
   spent?: number;
   paid?: boolean;
   basis?: string;
+  // The Flow project this job is made in (its name as Flow shows it), so the user sees where before approving.
+  flow_project?: string;
   // Set just before the click that makes Flow generate. A paid job that fails before it has spent nothing.
   committed?: boolean;
   progress?: string;
@@ -65,7 +67,7 @@ export interface Job {
 export type JobRunner = (job: Job) => Promise<string[]>;
 // Asked before every job starts: a reason not to run it (limit reached, STOP file, safety breaker), or null.
 export type JobGate = (job: Job) => string | null;
-export type JobMeta = Pick<Job, "estimate" | "paid" | "basis"> & { hold?: boolean };
+export type JobMeta = Pick<Job, "estimate" | "paid" | "basis" | "flow_project"> & { hold?: boolean };
 
 // Flow is driven like a careful person would: one generation at a time, with a
 // randomised pause between them.

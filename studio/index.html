@@ -109,6 +109,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--tally)}
 .badge.awaiting_approval{background:var(--warn);color:var(--ink)}
 .budget{font:700 15px var(--mono);margin-bottom:10px;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
 .approve{margin-bottom:12px;padding:12px 14px;border-left:5px solid var(--warn);background:var(--ink2);border-radius:var(--r);display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+#approveTop .approve{margin:12px 0 0;font-size:18px;border-left-width:8px} #approveTop .btn{font-size:18px;padding:10px 18px}
 .approve.stop{border-left-color:var(--bad)} .approve p{margin:0;flex:1 1 220px}
 .empty{color:var(--dim);font-size:16px}
 .gal{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:8px;margin-top:10px}
@@ -184,6 +185,7 @@ audio{width:100%;margin-top:8px;filter:invert(1) hue-rotate(180deg)}
   </header>
   <div id="offline"></div>
   <div id="hint"></div>
+  <div id="approveTop"></div>
 
   <nav class="tabs" id="tabs">
     <button data-tab="cast" class="on">Cast<small>characters</small></button>
@@ -444,7 +446,7 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const LIVE = location.protocol.startsWith("http") && TOKEN !== "__FLOW_" + "TOKEN__";
 const api = async (method, body = {}) => {
-  const res = await fetch(`/api/${method}`, { method: "POST", headers: { "content-type": "application/json", "x-flow-token": TOKEN }, body: JSON.stringify(body) });
+  const res = await fetch(`/api/${method}`, { method: "POST", headers: { "content-type": "application/json", "x-flow-token": TOKEN, "x-flow-studio": "1" }, body: JSON.stringify(body) });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || res.statusText);
   return data;
@@ -1160,10 +1162,15 @@ function renderBudget(b) {
   const w = b.waiting_for_approval, parts = [];
   if (b.stopped) parts.push(`<div class="approve stop"><p>Stopped: ${esc(b.stopped)}</p>${b.breaker ? `<button class="btn small" data-resume>Resume</button>` : ""}</div>`);
   for (const u of b.unsettled || []) parts.push(`<div class="approve stop"><p>${esc(u.project || "")} ${esc(u.scene || "")} started and never reported its cost. It may have been made and charged: look in Flow before making it again. Counted as ${u.counted} cr.</p><button class="btn small" data-settle="${esc(u.id)}">Enter real cost</button></div>`);
-  if (w.count) parts.push(`<div class="approve"><p>${w.count} job${w.count > 1 ? "s" : ""} waiting for your OK · at most ${w.credits} credits · ${b.left_today} left today</p><button class="btn small" data-approve-all>Approve all</button><button class="btn small ghost" data-reject-all>Reject all</button></div>`);
+  const where = [...new Set((renderBudget.jobs || []).filter((j) => j.status === "awaiting_approval" && j.flow_project).map((j) => j.flow_project))];
+  const ask = w.count ? `<div class="approve"><p>${w.count} job${w.count > 1 ? "s" : ""} waiting for your OK · at most ${w.credits} credits${where.length ? ` · in Flow project ${where.map((n) => `“${esc(n)}”`).join(", ")}` : ""} · ${b.left_today} left today</p><button class="btn small" data-approve-all>Approve all</button><button class="btn small ghost" data-reject-all>Reject all</button></div>` : "";
   $("#approve").innerHTML = parts.join("");
+  // The request itself goes across the top of the page, whatever tab is open, and into the browser tab's title.
+  $("#approveTop").innerHTML = ask + (b.stopped ? parts[0] : "");
+  document.title = w.count ? `(${w.count}) Approve? · Flow Studio` : b.stopped ? "Stopped · Flow Studio" : "Flow Studio";
 }
-$("#approve").addEventListener("click", async (e) => {
+document.addEventListener("click", async (e) => {
+  if (!e.target.closest("#approve, #approveTop")) return;
   const t = e.target;
   try {
     if (t.closest("[data-approve-all]")) { const out = await api("approve", {}); toast(`Approved: at most ${out.credits_at_most} credits`); }
@@ -1186,6 +1193,7 @@ function renderStatus(st) {
   if (f.plan) renderStatus.plan = f.plan;
   $("#status").innerHTML = `<span class="pill"><i class="tally ${cls}"></i>${text}</span>${renderStatus.plan ? `<span class="pill">${esc(renderStatus.plan)}</span>` : ""}${renderStatus.credits !== undefined ? `<span class="pill">${renderStatus.credits.toLocaleString()} credits</span>` : ""}`;
   $("#hint").innerHTML = f.hint ? `<div class="hint">${esc(f.hint)}</div>` : "";
+  renderBudget.jobs = st.jobs;
   renderBudget(st.budget);
   $("#pacing").innerHTML = st.pacing ? `<div class="pacing">⏱ ${esc(st.pacing)}</div>` : "";
   const jobs = [...st.jobs].reverse();
@@ -1197,7 +1205,7 @@ function renderStatus(st) {
       <span class="badge ${j.status}">${j.status}${j.progress ? " " + esc(j.progress) : ""}</span>${j.spent !== undefined ? `<span class="badge">${j.spent} cr spent</span>` : j.status === "awaiting_approval" || j.status === "queued" ? `<span class="badge">≤ ${j.estimate ?? 0} cr</span>` : j.credits !== undefined ? `<span class="badge">${j.credits} cr</span>` : ""}${j.attempts > 1 ? `<span class="badge">try ${j.attempts}</span>` : ""}
       ${j.status === "awaiting_approval" ? `<button class="btn small" data-approve="${j.id}">Approve</button>` : ""}${/queued|awaiting_approval/.test(j.status) ? `<button class="btn small ghost" data-cancel="${j.id}">Cancel</button>` : ""}${/failed|cancelled/.test(j.status) ? `<button class="btn small" data-retry="${j.id}">Retry</button>` : ""}${j.status === "done" && j.failed_scenes?.length ? `<button class="btn small" data-retry="${j.id}">Retry ${j.failed_scenes.length} failed image${j.failed_scenes.length > 1 ? "s" : ""}</button>` : ""}</div>
       ${j.status === "running" ? `<div class="meter"><i style="width:${parseInt(j.progress) || 4}%"></i></div>` : ""}
-      <p>${esc(j.prompt)}</p>${j.status === "awaiting_approval" && j.basis ? `<p style="opacity:.75">Price: ${esc(j.basis)}</p>` : ""}${j.note ? `<p style="color:var(--warn)">${esc(j.note)}</p>` : ""}${j.error ? `<p class="err">${esc(j.error)}</p>` : ""}
+      <p>${esc(j.prompt)}</p>${j.flow_project ? `<p style="opacity:.75">Flow project: ${esc(j.flow_project)}</p>` : ""}${j.status === "awaiting_approval" && j.basis ? `<p style="opacity:.75">Price: ${esc(j.basis)}</p>` : ""}${j.note ? `<p style="color:var(--warn)">${esc(j.note)}</p>` : ""}${j.error ? `<p class="err">${esc(j.error)}</p>` : ""}
       ${j.files.map((p) => (/\.(mp4|webm|mov)$/i.test(p) ? `<video controls playsinline preload="metadata" src="${media(p)}"></video>` : /\.(m4a|mp3|wav)$/i.test(p) ? `<audio controls src="${media(p)}"></audio>` : `<img class="out" src="${media(p)}">`)).join("")}</div>`).join("") || `<p class="empty">Nothing queued yet.</p>`;
   }
   estimate();
