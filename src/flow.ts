@@ -799,8 +799,24 @@ async function showAllMedia(page: Page, thorough = false): Promise<void> {
   await clearBackdrops(page);
 }
 
+// A new project opens with Flow's session panel on the right, and the normal prompt box (with its Agent toggle) only
+// appears once that panel is closed (seen 2026-11-11: the first job in a fresh project timed out looking for the
+// toggle). Only acts when the toggle is missing, so it can never close anything else by mistake.
+async function closeSessionPanel(page: Page): Promise<void> {
+  const agent = page.getByRole("button", { name: "Agent", exact: true });
+  if (await agent.isVisible().catch(() => false)) return;
+  for (const name of ["Close", "Close session", "Close panel"]) {
+    const x = page.getByRole("button", { name, exact: true }).first();
+    if (!(await x.isVisible().catch(() => false))) continue;
+    await x.click({ timeout: 5000 }).catch(() => undefined);
+    await pause(page, 1000);
+    if (await agent.isVisible().catch(() => false)) return;
+  }
+}
+
 async function ensureProjectGrid(page: Page): Promise<void> {
   await dismissOverlays(page);
+  await closeSessionPanel(page);
   const root = page.url().match(/^https:\/\/[^/]+\/project\/[0-9a-f-]{36}/)?.[0];
   // Compared by path: an address ending in ?hl=en is already the grid.
   if (root && new URL(page.url()).pathname !== new URL(root).pathname) {
@@ -821,6 +837,9 @@ export async function runGeneration(job: Job): Promise<string[]> {
 
   await ensureProjectGrid(page);
   const agent = page.getByRole("button", { name: "Agent", exact: true });
+  await agent.waitFor({ state: "visible", timeout: 10_000 }).catch(() => {
+    throw new Error("Flow's prompt box is not showing. If a session panel is open on the right of the Flow window, close it with its X, then retry. Nothing was generated.");
+  });
   if ((await agent.getAttribute("aria-pressed")) === "true") await agent.click();
   const clear = page.getByRole("button", { name: "Clear prompt" });
   if (await clear.isVisible().catch(() => false)) await clear.click();
