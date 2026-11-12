@@ -210,7 +210,9 @@ async function ghostMarks(file: string, width: number, height: number, mark: { c
 
 async function probe(file: string): Promise<ClipInfo> {
   // A raw ffprobe dump ("moov atom not found") told the user nothing. Say which file and what to do about it.
-  const { stdout } = await run(FFPROBE, ["-v", "error", "-show_entries", "stream=codec_type,width,height,duration:format=duration", "-of", "json", file]).catch(() => {
+  const { stdout } = await run(FFPROBE, ["-v", "error", "-show_entries", "stream=codec_type,width,height,duration:format=duration", "-of", "json", file]).catch((err: NodeJS.ErrnoException) => {
+    // A missing ffprobe used to be reported as a broken clip. Say what is really wrong.
+    if (err.code === "ENOENT") throw new Error(`ffprobe was not found, so "${basename(file)}" could not be checked. Install ffmpeg with: ${FFMPEG_HINT} (then restart the Claude app so it sees it).`);
     throw new Error(`"${basename(file)}" isn't a playable video - it may be an unfinished download or a ZIP of several clips. Remove it, or pick other clips.`);
   });
   const data = JSON.parse(stdout) as { streams: { codec_type: string; width?: number; height?: number; duration?: string }[]; format: { duration: string } };

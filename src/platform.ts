@@ -13,6 +13,19 @@ export const IS_WIN = process.platform === "win32";
 export const COMPUTER = IS_MAC ? "this Mac" : IS_WIN ? "this PC" : "this computer";
 export const BIN = IS_MAC ? "the Mac's Trash" : IS_WIN ? "the Recycle Bin" : "the Trash";
 
+// An app started from the Dock or Finder (Claude desktop, which launches this server) gets a bare PATH
+// (/usr/bin:/bin:/usr/sbin:/sbin) without Homebrew's folders, so a freshly installed ffmpeg, ffprobe or whisper-cli was
+// "not found" although Terminal finds them. Add the two standard Homebrew folders once, when this module loads; every
+// child process started later (execFile uses process.env by default) then sees them. Appended, never prepended, so a
+// program the user's own PATH already provides still wins.
+export function withHomebrewPath(pathValue: string | undefined, mac = IS_MAC): string | undefined {
+  if (!mac) return pathValue;
+  const have = (pathValue ?? "").split(":").filter(Boolean);
+  for (const dir of ["/opt/homebrew/bin", "/usr/local/bin"]) if (!have.includes(dir)) have.push(dir);
+  return have.join(":");
+}
+if (IS_MAC) process.env.PATH = withHomebrewPath(process.env.PATH);
+
 export const FFMPEG_HINT = IS_MAC ? "brew install ffmpeg" : IS_WIN ? "winget install Gyan.FFmpeg" : "sudo apt install ffmpeg";
 
 // PowerShell single-quoted string: the only character that needs escaping is the quote itself.
